@@ -1,0 +1,35 @@
+# =============================================================================
+# buildspec.yml · AWS CodeBuild · DevSecOps OSS (rocket code)
+# Proyecto CodeBuild con "privileged mode" activado (necesario para Docker).
+# Secretos en AWS Secrets Manager, secreto "devsecops-oss" (JSON) con llaves:
+#   SONAR_HOST_URL, SONAR_TOKEN, DOJO_URL, DOJO_API_KEY, DAST_TARGET_URL
+# Lo crea setup-aws.sh.
+# =============================================================================
+version: 0.2
+
+env:
+  shell: bash
+  variables:
+    FAIL_ON_HIGH: "false"       # true = falla con hallazgos High/Critical
+    ZAP_MODE: "baseline"        # baseline | full | api
+    ZAP_API_SPEC: ""
+    SONAR_BRANCHES: "main"
+  secrets-manager:
+    SONAR_HOST_URL: devsecops-oss:SONAR_HOST_URL
+    SONAR_TOKEN: devsecops-oss:SONAR_TOKEN
+    DOJO_URL: devsecops-oss:DOJO_URL
+    DOJO_API_KEY: devsecops-oss:DOJO_API_KEY
+    DAST_TARGET_URL: devsecops-oss:DAST_TARGET_URL
+
+phases:
+  install:
+    commands:
+      - command -v jq || (dnf install -y -q jq || yum install -y -q jq || apt-get install -y -qq jq)
+  build:
+    commands:
+      - bash devsecops/devsecops-scan.sh
+
+artifacts:
+  base-directory: devsecops-reports
+  files:
+    - '**/*'
