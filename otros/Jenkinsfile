@@ -1,0 +1,26 @@
+// DevSecOps OSS · Jenkins (rocket code) · usar como Multibranch Pipeline
+// Agente con etiqueta "docker" que tenga bash, docker, git, curl (y jq).
+// Credenciales (Secret text): sonar-token, dojo-api-key
+// Variables globales (Manage Jenkins > System): SONAR_HOST_URL, DOJO_URL, DAST_TARGET_URL
+pipeline {
+  agent { label 'docker' }
+  options { timeout(time: 120, unit: 'MINUTES') }
+  environment {
+    FAIL_ON_HIGH = 'false'
+    ZAP_MODE     = 'baseline'
+  }
+  stages {
+    stage('DevSecOps') {
+      when { anyOf { branch 'main'; branch 'develop'; changeRequest target: 'main' } }
+      steps {
+        withCredentials([string(credentialsId: 'sonar-token', variable: 'SONAR_TOKEN'),
+                         string(credentialsId: 'dojo-api-key', variable: 'DOJO_API_KEY')]) {
+          sh 'bash devsecops/devsecops-scan.sh'
+        }
+      }
+    }
+  }
+  post {
+    always { archiveArtifacts artifacts: 'devsecops-reports/**', allowEmptyArchive: true }
+  }
+}

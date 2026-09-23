@@ -1,0 +1,31 @@
+# DevSecOps OSS · Bitbucket Pipelines (rocket code)
+# Repository settings > Repository variables: SONAR_HOST_URL, DOJO_URL,
+#   DAST_TARGET_URL, SONAR_TOKEN (secured), DOJO_API_KEY (secured)
+image: atlassian/default-image:4
+
+clone:
+  depth: full
+
+definitions:
+  services:
+    docker:
+      memory: 3072
+  steps:
+    - step: &devsecops
+        name: DevSecOps (Opengrep, SonarQube, Trivy, ZAP, DefectDojo)
+        size: 2x
+        max-time: 120
+        services: [docker]
+        script:
+          - command -v jq || (apt-get -qq update && apt-get -qq install -y jq)
+          - export FAIL_ON_HIGH=false ZAP_MODE=baseline
+          - bash devsecops/devsecops-scan.sh
+        artifacts:
+          - devsecops-reports/**
+
+pipelines:
+  branches:
+    main: [{step: *devsecops}]
+    develop: [{step: *devsecops}]
+  pull-requests:
+    '**': [{step: *devsecops}]

@@ -1,0 +1,52 @@
+# Copia este archivo en tu repo como .github/workflows/devsecops.yml
+# DevSecOps OSS · GitHub Actions (rocket code)
+# Settings > Secrets and variables > Actions:
+#   Secrets:   SONAR_TOKEN, DOJO_API_KEY
+#   Variables: SONAR_HOST_URL, DOJO_URL, DAST_TARGET_URL
+name: devsecops
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  devsecops:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Escanear y reportar
+        run: bash devsecops/devsecops-scan.sh
+        env:
+          SONAR_HOST_URL: ${{ vars.SONAR_HOST_URL }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          DOJO_URL: ${{ vars.DOJO_URL }}
+          DOJO_API_KEY: ${{ secrets.DOJO_API_KEY }}
+          DAST_TARGET_URL: ${{ vars.DAST_TARGET_URL }}
+          FAIL_ON_HIGH: 'false'
+          ZAP_MODE: baseline
+      - name: SARIF Opengrep a Code scanning
+        if: always() && hashFiles('devsecops-reports/sarif/opengrep.sarif') != ''
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: devsecops-reports/sarif/opengrep.sarif
+          category: opengrep
+      - name: SARIF Trivy a Code scanning
+        if: always() && hashFiles('devsecops-reports/sarif/trivy.sarif') != ''
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: devsecops-reports/sarif/trivy.sarif
+          category: trivy
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: devsecops-reports
+          path: devsecops-reports
