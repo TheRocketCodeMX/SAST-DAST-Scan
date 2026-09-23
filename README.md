@@ -1,36 +1,69 @@
-# rocket code · DevSecOps multinube (SAST · SCA · DAST)
-
-Escaneo de seguridad open source para los pipelines de Azure, AWS y GCP:
-**Opengrep** y **SonarQube Community** (SAST), **Trivy** (SCA, secretos, IaC),
-**ZAP** (DAST contra staging) y **DefectDojo** (gestión de hallazgos).
+# rocket code · DevSecOps 100% open source (SAST · SCA · DAST)
 
 > Uso interno de rocket code. Proceso completo: [PR-DSO-001](docs/PROCESO.md).
 
-## Ejecutar el setup (desde cualquier equipo o país, sin instalar nada)
+Escaneo de seguridad para todos los repositorios, **sin licencias ni servicios de pago**. Todo corre en **un servidor propio** (por ejemplo, una EC2 que ya tengan en AWS):
 
-Abre la consola web de tu nube y pega el comando. Ya tiene tu sesión y las herramientas (`az`, `aws`, `gcloud`, `git`, `jq`).
-
-| Nube | 1. Abrir consola | 2. Pegar |
+| Componente | Para qué | Licencia |
 |---|---|---|
-| Azure | [Azure Cloud Shell](https://shell.azure.com/bash) | `bash <(curl -fsSL https://raw.githubusercontent.com/diegofernandez-dotcom/SAST-DAST-Scan/main/azure/setup-azure.sh)` |
-| AWS | [AWS CloudShell](https://console.aws.amazon.com/cloudshell/home) | `bash <(curl -fsSL https://raw.githubusercontent.com/diegofernandez-dotcom/SAST-DAST-Scan/main/aws/setup-aws.sh)` |
-| GCP | [![Open in Cloud Shell](https://gstatic.com/cloudssh/images/open-btn.svg)](https://shell.cloud.google.com/cloudshell/editor?cloudshell_git_repo=https%3A%2F%2Fgithub.com%2Fdiegofernandez-dotcom%2FSAST-DAST-Scan&cloudshell_git_branch=main&cloudshell_tutorial=gcp%2FTUTORIAL.md&show=terminal) | `bash <(curl -fsSL https://raw.githubusercontent.com/diegofernandez-dotcom/SAST-DAST-Scan/main/gcp/setup-gcp.sh)` |
+| Opengrep | SAST: patrones inseguros en el código | LGPL-2.1 |
+| SonarQube Community Build | Calidad y security hotspots | LGPL-3.0 |
+| Trivy | SCA: dependencias, secretos, IaC | Apache-2.0 |
+| ZAP | DAST contra staging | Apache-2.0 |
+| DefectDojo | Tablero único de hallazgos | BSD-3-Clause |
+| Jenkins | CI que dispara los escaneos | MIT |
+| Caddy + Let's Encrypt | HTTPS gratuito | Apache-2.0 |
+| Docker Engine | Contenedores | Apache-2.0 |
 
-El script pide los datos del proyecto (URLs de SonarQube, DefectDojo y staging, tokens),
-guarda los secretos en el gestor de secretos de la nube, crea el pipeline y los
-disparadores, y opcionalmente agrega los archivos a tu repo con commit y push.
+No usa CodeBuild, Cloud Build, Azure Pipelines de pago, Secrets Manager ni ningún otro servicio facturable.
+
+## 1. Preparar el servidor (una vez)
+
+- Ubuntu 22.04 o 24.04, **4 vCPU, 16 GB RAM, 100 GB de disco**, con salida a internet.
+- Puertos de entrada: **22** (solo tu IP), **80** y **443** (abiertos).
+- IP fija (en AWS, una Elastic IP). Dominio opcional: si no hay, se usa `sslip.io`.
+
+## 2. Instalar (un comando, en el servidor)
+
+Conéctate por SSH o con **EC2 Instance Connect** (botón *Connect* en la consola de AWS) y pega:
+
+```bash
+sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/TheRocketCodeMX/SAST-DAST-Scan/main/server/install.sh)"
+```
+
+Pide el dominio (o usa el sugerido) y un correo. Al terminar muestra las URLs:
+
+- `https://sonar.<dominio>` · SonarQube
+- `https://dojo.<dominio>` · DefectDojo
+- `https://ci.<dominio>` · Jenkins
+
+## 3. Agregar repositorios
+
+```bash
+sudo devsecops add-repo
+```
+
+Funciona con cualquier git por HTTPS: **GitHub, Azure Repos, GitLab, Bitbucket, CodeCommit, Gitea**. Para repos privados pide un token de **solo lectura**. Jenkins revisa cada 5 minutos las ramas configuradas; cuando hay un commit nuevo corre el escaneo y sube los hallazgos a DefectDojo. No hay que cambiar nada en los repos de las apps.
+
+## Comandos
+
+```
+sudo devsecops add-repo              agrega un repo
+sudo devsecops list                  lista los repos
+sudo devsecops remove-repo NOMBRE    quita un repo
+sudo devsecops status                estado y URLs
+sudo devsecops credentials           usuarios admin
+sudo devsecops set FAIL_ON_HIGH true bloquear builds con Critical/High
+sudo devsecops set ZAP_MODE full     DAST activo (solo staging)
+sudo devsecops update                actualiza las imágenes
+sudo devsecops logs jenkins          logs
+```
 
 ## Contenido
 
 ```
-devsecops/devsecops-scan.sh   núcleo común (va en la raíz de cada repo de app)
-azure/  azure-pipelines.yml · azure-pipelines-portable.yml · setup-azure.sh
-aws/    buildspec.yml · setup-aws.sh
-gcp/    cloudbuild.yaml · setup-gcp.sh · TUTORIAL.md
-otros/  github-actions-devsecops.yml · .gitlab-ci.yml · Jenkinsfile · bitbucket-pipelines.yml
+server/install.sh             instalador del servidor
+server/devsecops              comando de administración
+devsecops/devsecops-scan.sh   escaneo (Opengrep, SonarQube, Trivy, ZAP → DefectDojo)
+docs/PROCESO.md               proceso PR-DSO-001
 ```
-
-## Seguridad
-
-- Los scripts no contienen secretos. Cada dev captura los suyos al ejecutarlos y quedan en el gestor de secretos de su nube.
-- Revisa el script antes de ejecutarlo: está completo en este repositorio.
