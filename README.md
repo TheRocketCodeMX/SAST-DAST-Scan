@@ -4,7 +4,7 @@ Escaneo de seguridad open source para los pipelines de Azure, AWS y GCP:
 **Opengrep** y **SonarQube Community** (SAST), **Trivy** (SCA, secretos, IaC),
 **ZAP** (DAST contra staging) y **DefectDojo** (gestión de hallazgos).
 
-> Uso interno de rocket code. Proceso: PR-DSO-001.
+> Uso interno de rocket code. Proceso completo: [PR-DSO-001](docs/PROCESO.md).
 
 ## Ejecutar el setup (desde cualquier equipo o país, sin instalar nada)
 
