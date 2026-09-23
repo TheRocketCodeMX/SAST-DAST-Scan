@@ -1,143 +1,125 @@
 # PR-DSO-001 · Proceso de escaneo DevSecOps en CI/CD
 
 > **Uso interno de rocket code.** No distribuir fuera de la organización.
-> Versión 1.0 · 23 de septiembre de 2026 · Dueño del proceso: [__] · Aprobó: [__]
+> Versión 2.0 · 23 de septiembre de 2026 · Dueño del proceso: [__] · Aprobó: [__]
 
 ## 1. Objetivo, alcance y roles
 
-**Objetivo.** Detectar vulnerabilidades de código, dependencias, secretos, configuración de infraestructura y de la aplicación en ejecución en cada cambio, y centralizar los hallazgos en DefectDojo.
+**Objetivo.** Detectar vulnerabilidades de código, dependencias, secretos, IaC y de la aplicación en ejecución en cada cambio, y centralizar los hallazgos en DefectDojo, **con herramientas 100% open source y sin costo de licencias ni servicios de pago**.
 
-**Alcance.** Repositorios de aplicaciones con CI/CD en Azure, AWS o GCP (también GitHub Actions, GitLab CI, Jenkins o Bitbucket). Se dispara con push a `main` y `develop` y con PRs hacia `main`.
+**Alcance.** Todos los repositorios de aplicaciones, alojados en cualquier git (GitHub, Azure Repos, GitLab, Bitbucket, CodeCommit, Gitea). Se escanean las ramas configuradas (por defecto `main` y `develop`) en cada commit nuevo.
 
 | Rol | Responsabilidad |
 |---|---|
-| DevOps del proyecto | Ejecuta la configuración (F3 y F4) y mantiene el pipeline |
-| AppSec / Seguridad | Administra SonarQube y DefectDojo, emite tokens, valida la primera ejecución y hace el triage |
-| Líder técnico | Asigna y corrige hallazgos, aprueba activar `FAIL_ON_HIGH` |
+| DevOps / Infra | Prepara el servidor (F1), instala (F2), da de alta repos (F3) |
+| AppSec / Seguridad | Valida la primera ejecución (F4) y hace el triage de hallazgos (F5) |
+| Líder técnico | Corrige hallazgos y aprueba `FAIL_ON_HIGH=true` (F6) |
 | PO | Informado del estado de hallazgos y riesgos aceptados |
 
-| Herramienta | Tipo | Qué revisa |
+| Herramienta | Tipo | Licencia |
 |---|---|---|
-| Opengrep | SAST | Patrones inseguros en el código |
-| SonarQube Community | SAST / calidad | Calidad, deuda técnica y security hotspots (rama `main`) |
-| Trivy 0.69.3 | SCA | Dependencias vulnerables, secretos, IaC |
-| ZAP | DAST | La app desplegada en staging (no corre en PRs) |
-| DefectDojo | Gestión | Consolida hallazgos por repo y rama |
+| Opengrep | SAST | LGPL-2.1 |
+| SonarQube Community Build | Calidad / hotspots | LGPL-3.0 |
+| Trivy | SCA, secretos, IaC | Apache-2.0 |
+| ZAP | DAST | Apache-2.0 |
+| DefectDojo | Gestión de hallazgos | BSD-3-Clause |
+| Jenkins | CI | MIT |
+| Caddy + Let's Encrypt | HTTPS | Apache-2.0 |
+| Docker Engine | Contenedores | Apache-2.0 |
 
 ## 2. Flujo
 
-| Fase | Entrada | Salida | Responsable |
-|---|---|---|---|
-| F1 Prerrequisitos | Solicitud del proyecto | URLs, token de SonarQube, API key de DefectDojo, staging autorizado | AppSec |
-| F2 Elegir nube | Dónde corre el CI/CD | Azure, AWS o GCP | DevOps |
-| F3 Configurar | Valores de F1 | Secretos cargados, pipeline y disparadores | DevOps |
-| F4 Integrar al repo | Este repositorio | Pipeline y `devsecops/devsecops-scan.sh` en `main` | DevOps |
-| F5 Validar | Primera ejecución | Criterios de aceptación cumplidos | DevOps + AppSec |
-| F6 Operar | Hallazgos en DefectDojo | Hallazgos atendidos, riesgos documentados | Líder técnico + AppSec |
+| Fase | Qué se hace | Responsable |
+|---|---|---|
+| F1 Servidor | Instancia Linux con puertos 22/80/443 e IP fija | DevOps |
+| F2 Instalar | Un comando instala todo en el servidor | DevOps |
+| F3 Alta de repos | `sudo devsecops add-repo` por cada repositorio | DevOps |
+| F4 Validar | Primera ejecución y criterios de aceptación | DevOps + AppSec |
+| F5 Operar | Triage y corrección en DefectDojo | AppSec + Líder técnico |
+| F6 Endurecer | `FAIL_ON_HIGH=true` cuando no haya Critical/High | Líder técnico |
 
-**Cómo se ejecuta desde cualquier país.** El dev abre la consola web de su nube (ya autenticada con su cuenta) y pega una línea. No instala nada ni depende de ningún equipo.
+Arquitectura: un solo servidor con Docker. Jenkins revisa los repos cada 5 minutos (no necesita webhooks), descarga el código, corre Opengrep, SonarQube, Trivy y ZAP en contenedores y sube los resultados a DefectDojo. Caddy publica las tres interfaces con HTTPS gratuito.
 
-## 3. F1 y F2 · Prerrequisitos y selección de nube
+## 3. F1 · Servidor (AWS)
 
-- SonarQube y DefectDojo publicados con HTTPS (una sola instancia de cada uno para las tres nubes).
-- Token de SonarQube (My Account → Security → Global Analysis) y API v2 key de DefectDojo.
-- URL de staging autorizada para ZAP.
-- Permisos de admin en la cuenta, suscripción o proyecto de la nube.
+- **EC2 Ubuntu 22.04/24.04**, mínimo **4 vCPU / 16 GB RAM / 100 GB** (p. ej. t3.xlarge o m6i.xlarge).
+- **Security Group**: 22 solo desde tu IP; 80 y 443 desde 0.0.0.0/0.
+- **Elastic IP** asociada.
+- **DNS opcional**: registros A `sonar.`, `dojo.` y `ci.` apuntando a la IP. Sin dominio se usa `<ip-con-guiones>.sslip.io`.
 
-| Valor | Tipo |
+Comandos equivalentes con AWS CLI (operaciones sin costo):
+
+```bash
+SG=sg-xxxxxxxx; MIIP=$(curl -s https://checkip.amazonaws.com)
+aws ec2 authorize-security-group-ingress --group-id $SG --protocol tcp --port 22  --cidr $MIIP/32
+aws ec2 authorize-security-group-ingress --group-id $SG --protocol tcp --port 80  --cidr 0.0.0.0/0
+aws ec2 authorize-security-group-ingress --group-id $SG --protocol tcp --port 443 --cidr 0.0.0.0/0
+```
+
+En Azure (NSG) o GCP (regla de firewall) aplica lo mismo: abrir 80 y 443, y 22 solo desde tu IP.
+
+## 4. F2 · Instalación
+
+1. Conectarse al servidor por SSH o con **EC2 Instance Connect** (consola de AWS → instancia → *Connect*).
+2. Pegar:
+   ```bash
+   sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/TheRocketCodeMX/SAST-DAST-Scan/main/server/install.sh)"
+   ```
+3. Responder dominio (o dejar el sugerido) y correo para el certificado.
+4. El instalador: instala Docker, ajusta el sistema para SonarQube, levanta SonarQube + PostgreSQL, DefectDojo, Jenkins y Caddy; cambia la contraseña de admin de SonarQube, genera los tokens y configura Jenkins.
+5. Ver credenciales: `sudo devsecops credentials` (quedan en `/opt/devsecops/.env`, solo root).
+
+## 5. F3 · Alta de repositorios
+
+```bash
+sudo devsecops add-repo
+```
+
+Pide URL HTTPS, ramas, URL de staging (para ZAP) y, si el repo es privado, un **token de solo lectura**:
+
+| Git | Token de solo lectura |
 |---|---|
-| `SONAR_HOST_URL` | normal |
-| `SONAR_TOKEN` | secreto |
-| `DOJO_URL` | normal |
-| `DOJO_API_KEY` | secreto |
-| `DAST_TARGET_URL` | normal |
+| GitHub | Fine-grained token con *Contents: Read* sobre el repo |
+| Azure Repos | PAT con *Code (Read)* |
+| GitLab | Token con `read_repository` |
+| Bitbucket | Access token con *Repositories: Read* |
+| CodeCommit | Credenciales HTTPS de Git de un usuario IAM con `codecommit:GitPull` |
 
-Regla: el escaneo se configura en la misma nube donde ya se construye y despliega la app.
+No se modifica ningún repo de aplicación.
 
-| | Azure | AWS | GCP |
-|---|---|---|---|
-| Servicio | Azure Pipelines | CodeBuild | Cloud Build |
-| Archivo | `azure-pipelines.yml` | `buildspec.yml` | `cloudbuild.yaml` |
-| Secretos | Variable group `devsecops-oss` | Secrets Manager `devsecops-oss` | Secret Manager (2 secretos) |
-| Docker | Incluido | Privileged mode | Incluido (red `cloudbuild`) |
+## 6. F4 · Criterios de aceptación
 
-## 4. F3 y F4 · Procedimiento por nube
+- [ ] `https://sonar.`, `https://dojo.` y `https://ci.` abren con certificado válido.
+- [ ] En Jenkins aparece el job `scan-<repo>` y termina en verde.
+- [ ] El log muestra el resumen de Opengrep, Trivy, SonarQube y ZAP sin “ERROR”.
+- [ ] DefectDojo tiene el producto (nombre del repo) con un test por herramienta.
+- [ ] Un commit nuevo en `main` dispara un escaneo en menos de 10 minutos.
 
-### 4.1 Azure
-
-1. Abrir [Azure Cloud Shell](https://shell.azure.com/bash).
-2. Pegar:
-   ```bash
-   bash <(curl -fsSL https://raw.githubusercontent.com/diegofernandez-dotcom/SAST-DAST-Scan/main/azure/setup-azure.sh)
-   ```
-3. El script crea el variable group con secretos, instala SARIF Scans Tab, agrega el pipeline a tu repo (clásico o portable) y crea el pipeline.
-
-### 4.2 AWS
-
-1. Abrir [AWS CloudShell](https://console.aws.amazon.com/cloudshell/home).
-2. Pegar:
-   ```bash
-   bash <(curl -fsSL https://raw.githubusercontent.com/diegofernandez-dotcom/SAST-DAST-Scan/main/aws/setup-aws.sh)
-   ```
-3. El script crea el secreto en Secrets Manager, el rol IAM, el proyecto CodeBuild (privileged) y el webhook de push y PR. Con Bitbucket o GitLab, conectar el repo antes en CodeBuild → Settings → Connections.
-
-### 4.3 GCP
-
-1. Conectar el repo de la app en [Cloud Build → Triggers → Connect repository](https://console.cloud.google.com/cloud-build/triggers/connect).
-2. Abrir [Google Cloud Shell](https://shell.cloud.google.com/cloudshell/editor?cloudshell_git_repo=https%3A%2F%2Fgithub.com%2Fdiegofernandez-dotcom%2FSAST-DAST-Scan&cloudshell_git_branch=main&cloudshell_tutorial=gcp%2FTUTORIAL.md&show=terminal).
-3. Pegar:
-   ```bash
-   bash <(curl -fsSL https://raw.githubusercontent.com/diegofernandez-dotcom/SAST-DAST-Scan/main/gcp/setup-gcp.sh)
-   ```
-4. El script habilita APIs, crea los secretos, da acceso a la cuenta de servicio y crea los triggers (o lanza un build manual).
-
-## 5. F5 y F6 · Validación y operación
-
-**Criterios de aceptación de la primera ejecución**
-
-- [ ] El pipeline corre completo al hacer push a `main`.
-- [ ] El resumen del log muestra Opengrep, Trivy, SonarQube y ZAP sin “ERROR”.
-- [ ] DefectDojo tiene el producto (nombre del repo), engagement `CI-CD main` y un test por herramienta.
-- [ ] SonarQube muestra el proyecto.
-- [ ] Un PR hacia `main` dispara el pipeline y omite ZAP.
-- [ ] `devsecops-reports/` queda como artefacto.
-
-**Operación continua**
+## 7. F5 y F6 · Operación
 
 1. Triage de hallazgos nuevos en DefectDojo (AppSec).
-2. Corrección por severidad. Plazo objetivo: Critical [__] días, High [__] días, Medium [__] días (Líder técnico).
-3. Sin Critical/High abiertos → `FAIL_ON_HIGH=true` (Líder técnico).
-4. Revisión periódica [__] de riesgos aceptados, versiones y reglas (AppSec).
+2. Corrección por severidad. Plazo objetivo: Critical [__] días, High [__] días, Medium [__] días.
+3. Sin Critical/High abiertos: `sudo devsecops set FAIL_ON_HIGH true`.
+4. Revisión periódica [__]: riesgos aceptados, `sudo devsecops update`, usuarios.
+5. Crear usuarios individuales en SonarQube, DefectDojo y Jenkins para cada dev; no compartir las cuentas admin.
 
-| Variable | Default | Cuándo cambiarla |
-|---|---|---|
-| `FAIL_ON_HIGH` | `false` | `true` para bloquear merges con Critical/High |
-| `ZAP_MODE` | `baseline` | `full` (solo staging) o `api` con `ZAP_API_SPEC` |
-| `SONAR_BRANCHES` | `main` | Si la rama principal tiene otro nombre |
-| `DAST_ON_PR` | `false` | Solo si cada PR despliega su ambiente |
-| `TRIVY_IMAGE` | `0.69.3` | No usar 0.69.4 a 0.69.6 (GHSA-69fq-xp46-6x23) |
+## 8. Costos
 
-## 6. Otras plataformas
+| Concepto | Costo |
+|---|---|
+| Licencias de todas las herramientas | $0 (open source) |
+| Certificados HTTPS | $0 (Let's Encrypt) |
+| DNS | $0 con sslip.io, o el dominio que ya tengan |
+| Servicios de CI/secretos de la nube | No se usan |
+| Servidor | El que ya tienen; si se crea uno nuevo, se paga la instancia |
 
-Copiar el archivo de `otros/` y la carpeta `devsecops/` a la raíz del repo y dar de alta los 5 valores.
+## 9. Solución de problemas
 
-| Plataforma | Archivo | Secretos |
-|---|---|---|
-| GitHub Actions | `otros/github-actions-devsecops.yml` → `.github/workflows/` | Settings → Secrets and variables → Actions |
-| GitLab CI | `otros/.gitlab-ci.yml` | Settings → CI/CD → Variables (masked) |
-| Jenkins | `otros/Jenkinsfile` | Credentials `sonar-token`, `dojo-api-key` |
-| Bitbucket | `otros/bitbucket-pipelines.yml` | Repository variables (secured) |
-
-## 7. Solución de problemas
-
-| Síntoma | Nube | Acción |
-|---|---|---|
-| “Cannot connect to the Docker daemon” | AWS | Activar privileged mode en CodeBuild |
-| `AccessDeniedException` al leer el secreto | AWS | El rol necesita `secretsmanager:GetSecretValue` |
-| “Permission denied on secret” | GCP | `roles/secretmanager.secretAccessor` a la cuenta de servicio |
-| “Variable group could not be found” | Azure | Nombre exacto `devsecops-oss`; autorizar el pipeline |
-| “No hosted parallelism has been purchased or granted” | Azure | Pedir el grant gratuito o usar agente self-hosted |
-| SonarQube o DefectDojo: timeout | Todas | El servicio no es accesible desde el agente |
-| ZAP rc=3 | Todas | Staging caído; en modo `api` definir `ZAP_API_SPEC` |
-| GitHub pide usuario y contraseña al hacer push | Todas | Usar un token personal como contraseña |
-| “Falta az / aws / gcloud” | Todas | Correr el comando en la consola web de la nube |
+| Síntoma | Acción |
+|---|---|
+| No abre `https://...` | Revisar Security Group (80/443) y que el DNS apunte a la IP; `sudo devsecops logs caddy` |
+| SonarQube no arranca | Falta memoria (16 GB); `sudo devsecops logs sonarqube` |
+| Job falla en *Checkout* | URL o token del repo; `sudo devsecops add-repo` de nuevo con el mismo nombre |
+| “Opengrep no genero reporte” | El servidor no llega a github.com o hubo rate limit |
+| ZAP rc=3 | Staging caído o inaccesible desde el servidor |
+| Límite de descargas de Docker Hub | Esperar unas horas o iniciar sesión con `docker login` (cuenta gratuita) |
