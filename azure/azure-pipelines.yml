@@ -1,0 +1,285 @@
+# =============================================================================
+# azure-pipelines.yml - DevSecOps 100% open source
+#   SAST: Opengrep (seguridad) + SonarQube Community Build (calidad/hotspots)
+#   SCA : Trivy (dependencias, secretos, IaC)
+#   DAST: ZAP (baseline | full | api) contra staging
+#   Gestion: DefectDojo (import automatico de hallazgos)
+# Requiere el variable group "devsecops-oss" con:
+#   SONAR_HOST_URL, SONAR_TOKEN (secreta), DOJO_URL, DOJO_API_KEY (secreta),
+#   DAST_TARGET_URL
+# =============================================================================
+
+trigger:
+  branches:
+    include: [main, develop]
+
+pr:
+  branches:
+    include: [main]
+
+pool:
+  vmImage: ubuntu-latest   # o el nombre de tu pool self-hosted (con Docker)
+
+variables:
+  - group: devsecops-oss
+  - name: APP_NAME
+    value: $(Build.Repository.Name)
+  - name: DOJO_PRODUCT_TYPE
+    value: Aplicaciones
+  - name: DOJO_ENGAGEMENT
+    value: CI-CD $(Build.SourceBranchName)
+  # Opengrep: vacio = ultima version; o fija una, p. ej. v1.21.0
+  - name: OPENGREP_VERSION
+    value: ''
+  # Carpetas de reglas de opengrep-rules a usar (segun tus lenguajes)
+  - name: OPENGREP_RULES_DIRS
+    value: 'java javascript typescript python csharp go php generic dockerfile'
+  # Trivy: FIJA una version verificada (evita 0.69.4 a 0.69.6, ver advisory GHSA-69fq-xp46-6x23)
+  - name: TRIVY_IMAGE
+    value: 'aquasec/trivy:0.69.3'
+  - name: ZAP_IMAGE
+    value: 'ghcr.io/zaproxy/zaproxy:stable'
+  # baseline (pasivo, ~2 min) | full (activo, ataca la app) | api (OpenAPI)
+  - name: ZAP_MODE
+    value: baseline
+  # Solo para ZAP_MODE=api: URL del OpenAPI/Swagger, p. ej. https://staging.tuapp.com/v3/api-docs
+  - name: ZAP_API_SPEC
+    value: ''
+  # true = el pipeline falla si hay hallazgos High/Critical (o quality gate rojo)
+  - name: FAIL_ON_HIGH
+    value: 'false'
+
+stages:
+# -----------------------------------------------------------------------------
+# STAGE 1: SAST + SCA (los tres jobs corren en paralelo)
+# -----------------------------------------------------------------------------
+- stage: SAST
+  displayName: SAST y SCA
+  jobs:
+
+  # ---------------- Opengrep ----------------
+  - job: opengrep
+    displayName: Opengrep (SAST seguridad)
+    steps:
+    - checkout: self
+
+    - bash: |
+        set -euo pipefail
+        ARGS=""
+        if [ -n "${OPENGREP_VERSION:-}" ]; then ARGS="-v ${OPENGREP_VERSION}"; fi
+        curl -fsSL https://raw.githubusercontent.com/opengrep/opengrep/main/install.sh | bash -s -- $ARGS
+        echo "##vso[task.prependpath]$HOME/.opengrep/cli/latest"
+      displayName: Instalar Opengrep
+
+    - bash: |
+        set -euo pipefail
+        OUT="$(Build.ArtifactStagingDirectory)/opengrep"
+        RULES="$(Agent.TempDirectory)/opengrep-rules"
+        mkdir -p "$OUT"
+        git clone --depth 1 https://github.com/opengrep/opengrep-rules.git "$RULES"
+
+        CONFIGS=""
+        for d in $OPENGREP_RULES_DIRS; do
+          if [ -d "$RULES/$d" ]; then CONFIGS="$CONFIGS --config $RULES/$d"; fi
+        done
+        # Reglas propias del equipo (opcional): carpeta .opengrep/ en la raiz del repo
+        if [ -d .opengrep ]; then CONFIGS="$CONFIGS --config .opengrep"; fi
+
+        opengrep scan $CONFIGS \
+          --exclude node_modules --exclude vendor --exclude dist --exclude build --exclude target \
+          --sarif-output="$OUT/opengrep.sarif" \
+          --json-output="$OUT/opengrep.json" \
+          . || echo "##vso[task.logissue type=warning]Opengrep termino con rc=$? (revisar reglas con error)"
+        if [ ! -s "$OUT/opengrep.json" ]; then
+          echo "##vso[task.logissue type=error]Opengrep no genero reporte"
+          exit 1
+        fi
+
+        HIGH=$(jq '[.results[] | select(.extra.severity=="ERROR")] | length' "$OUT/opengrep.json")
+        TOTAL=$(jq '.results | length' "$OUT/opengrep.json")
+        echo "Opengrep: $TOTAL hallazgos, $HIGH de severidad ERROR"
+        if [ "$FAIL_ON_HIGH" = "true" ] && [ "$HIGH" -gt 0 ]; then
+          echo "##vso[task.logissue type=error]Opengrep encontro $HIGH hallazgos ERROR"
+          exit 1
+        fi
+      displayName: Escanear con Opengrep
+
+    - publish: $(Build.ArtifactStagingDirectory)/opengrep
+      artifact: sast-opengrep
+      displayName: Publicar reportes Opengrep
+      condition: always()
+
+  # ---------------- SonarQube Community ----------------
+  # Community Build analiza solo UNA rama; por eso corre solo en main.
+  - job: sonarqube
+    displayName: SonarQube Community (calidad + hotspots)
+    condition: eq(variables['Build.SourceBranch'], 'refs/heads/main')
+    steps:
+    - checkout: self
+      fetchDepth: 0
+
+    - bash: |
+        set -euo pipefail
+        KEY=$(printf '%s' "$APP_NAME" | tr -c 'A-Za-z0-9_.:-' '_')
+        docker run --rm \
+          -e SONAR_HOST_URL="$SONAR_HOST_URL" \
+          -e SONAR_TOKEN="$SONAR_TOKEN_SECRET" \
+          -v "$(Build.SourcesDirectory):/usr/src" \
+          sonarsource/sonar-scanner-cli \
+          -Dsonar.projectKey="$KEY" \
+          -Dsonar.projectName="$APP_NAME" \
+          -Dsonar.sources=. \
+          -Dsonar.exclusions="**/node_modules/**,**/vendor/**,**/dist/**,**/build/**,**/target/**" \
+          -Dsonar.qualitygate.wait="$FAIL_ON_HIGH" \
+          -Dsonar.qualitygate.timeout=600
+        echo "Dashboard: $SONAR_HOST_URL/dashboard?id=$KEY"
+      displayName: Analizar con SonarQube
+      env:
+        SONAR_TOKEN_SECRET: $(SONAR_TOKEN)
+    # NOTA Java/.NET: sustituye el paso anterior por "mvn verify sonar:sonar",
+    # "gradle sonar" o "dotnet sonarscanner", porque requieren codigo compilado.
+
+  # ---------------- Trivy (SCA) ----------------
+  - job: trivy
+    displayName: Trivy (dependencias, secretos, IaC)
+    steps:
+    - checkout: self
+
+    - bash: |
+        set -euo pipefail
+        OUT="$(Build.ArtifactStagingDirectory)/trivy"
+        mkdir -p "$OUT"
+        docker run --rm \
+          -v "$(Build.SourcesDirectory):/src:ro" \
+          -v "$OUT:/out" \
+          "$TRIVY_IMAGE" fs \
+          --scanners vuln,secret,misconfig \
+          --format json --output /out/trivy.json /src
+        docker run --rm -v "$OUT:/out" "$TRIVY_IMAGE" \
+          convert --format sarif --output /out/trivy.sarif /out/trivy.json
+
+        HIGH=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="CRITICAL" or .Severity=="HIGH")] | length' "$OUT/trivy.json")
+        echo "Trivy: $HIGH vulnerabilidades HIGH/CRITICAL en dependencias"
+        if [ "$FAIL_ON_HIGH" = "true" ] && [ "$HIGH" -gt 0 ]; then
+          echo "##vso[task.logissue type=error]Trivy encontro $HIGH vulnerabilidades HIGH/CRITICAL"
+          exit 1
+        fi
+      displayName: Escanear con Trivy
+
+    - publish: $(Build.ArtifactStagingDirectory)/trivy
+      artifact: sca-trivy
+      displayName: Publicar reportes Trivy
+      condition: always()
+
+# -----------------------------------------------------------------------------
+# STAGE 2: DAST con ZAP (no corre en PRs: staging no tiene el codigo del PR)
+# -----------------------------------------------------------------------------
+- stage: DAST
+  displayName: DAST (ZAP)
+  dependsOn: SAST
+  condition: and(succeededOrFailed(), ne(variables['Build.Reason'], 'PullRequest'))
+  jobs:
+  - job: zap
+    displayName: ZAP contra staging
+    timeoutInMinutes: 120
+    steps:
+    - checkout: self   # para leer .zap/rules.tsv si existe
+
+    - bash: |
+        set -uo pipefail
+        WRK="$(Build.ArtifactStagingDirectory)/zap"
+        mkdir -p "$WRK" && chmod 777 "$WRK"
+
+        CONF=""
+        if [ -f .zap/rules.tsv ]; then cp .zap/rules.tsv "$WRK/rules.tsv"; CONF="-c rules.tsv"; fi
+
+        case "$ZAP_MODE" in
+          full) CMD="zap-full-scan.py -t $DAST_TARGET_URL" ;;
+          api)  CMD="zap-api-scan.py -t $ZAP_API_SPEC -f openapi" ;;
+          *)    CMD="zap-baseline.py -t $DAST_TARGET_URL" ;;
+        esac
+
+        docker run --rm -v "$WRK:/zap/wrk:rw" "$ZAP_IMAGE" \
+          $CMD $CONF -r zap.html -J zap.json -x zap.xml -I
+        RC=$?
+        # Codigos ZAP: 0 ok, 1 FAIL, 2 WARN, 3 error de ejecucion
+        if [ "$RC" -eq 3 ] || [ ! -s "$WRK/zap.json" ]; then
+          echo "##vso[task.logissue type=error]ZAP no pudo completar el escaneo (rc=$RC)"
+          exit 1
+        fi
+
+        HIGH=$(jq '[.site[]?.alerts[]? | select(.riskcode=="3")] | length' "$WRK/zap.json")
+        echo "ZAP: $HIGH alertas de riesgo High"
+        if [ "$FAIL_ON_HIGH" = "true" ] && [ "$HIGH" -gt 0 ]; then
+          echo "##vso[task.logissue type=error]ZAP encontro $HIGH alertas High"
+          exit 1
+        fi
+        exit 0
+      displayName: Escanear con ZAP ($(ZAP_MODE))
+
+    - publish: $(Build.ArtifactStagingDirectory)/zap
+      artifact: dast-zap
+      displayName: Publicar reportes ZAP
+      condition: always()
+
+# -----------------------------------------------------------------------------
+# STAGE 3: consolidar en DefectDojo + pestana SARIF (corre aunque algo falle)
+# -----------------------------------------------------------------------------
+- stage: Report
+  displayName: Reporte (DefectDojo)
+  dependsOn: [SAST, DAST]
+  condition: always()
+  jobs:
+  - job: defectdojo
+    displayName: Importar a DefectDojo
+    steps:
+    - checkout: none
+
+    - download: current
+      displayName: Descargar reportes
+
+    - bash: |
+        set -uo pipefail
+        W="$(Pipeline.Workspace)"
+        upload() {  # $1=scan_type  $2=archivo  $3=titulo del test
+          if [ ! -s "$2" ]; then echo "No existe $2, se omite"; return 0; fi
+          if curl -sS -f -X POST "$DOJO_URL/api/v2/reimport-scan/" \
+              -H "Authorization: Token $DOJO_KEY" \
+              -F "scan_type=$1" \
+              -F "file=@$2" \
+              -F "test_title=$3" \
+              -F "product_type_name=$DOJO_PRODUCT_TYPE" \
+              -F "product_name=$APP_NAME" \
+              -F "engagement_name=$DOJO_ENGAGEMENT" \
+              -F "auto_create_context=true" \
+              -F "close_old_findings=true" \
+              -F "active=true" \
+              -F "verified=false" \
+              -F "minimum_severity=Info" \
+              -F "build_id=$(Build.BuildNumber)" \
+              -F "commit_hash=$(Build.SourceVersion)" \
+              -F "branch_tag=$(Build.SourceBranchName)" > /dev/null; then
+            echo "Importado: $3"
+          else
+            echo "##vso[task.logissue type=warning]No se pudo importar $3 a DefectDojo"
+          fi
+        }
+        upload "Semgrep JSON Report" "$W/sast-opengrep/opengrep.json" "Opengrep"
+        upload "Trivy Scan"          "$W/sca-trivy/trivy.json"        "Trivy"
+        upload "ZAP Scan"            "$W/dast-zap/zap.xml"            "ZAP"
+        echo "Ver hallazgos: $DOJO_URL/product"
+      displayName: Subir hallazgos a DefectDojo
+      env:
+        DOJO_KEY: $(DOJO_API_KEY)
+
+    # Artefacto con nombre fijo que lee la extension "SARIF SAST Scans Tab"
+    - bash: |
+        mkdir -p "$(Build.ArtifactStagingDirectory)/CodeAnalysisLogs"
+        cp "$(Pipeline.Workspace)"/sast-opengrep/*.sarif "$(Build.ArtifactStagingDirectory)/CodeAnalysisLogs/" 2>/dev/null || true
+        cp "$(Pipeline.Workspace)"/sca-trivy/*.sarif     "$(Build.ArtifactStagingDirectory)/CodeAnalysisLogs/" 2>/dev/null || true
+        touch "$(Build.ArtifactStagingDirectory)/CodeAnalysisLogs/.keep"
+      displayName: Preparar SARIF
+
+    - publish: $(Build.ArtifactStagingDirectory)/CodeAnalysisLogs
+      artifact: CodeAnalysisLogs
+      displayName: Publicar SARIF (pestana Scans)
