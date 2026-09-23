@@ -12,12 +12,12 @@
 # No usa servicios de pago de ninguna nube.
 #
 # Uso (en el servidor, Ubuntu 22.04/24.04):
-#   sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/diegofernandez-dotcom/SAST-DAST-Scan/main/server/install.sh)"
+#   sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/TheRocketCodeMX/SAST-DAST-Scan/main/server/install.sh)"
 # Idempotente: se puede volver a correr.
 # =============================================================================
 set -uo pipefail
 
-KIT_RAW="${KIT_RAW:-https://raw.githubusercontent.com/diegofernandez-dotcom/SAST-DAST-Scan/main}"
+KIT_RAW="${KIT_RAW:-https://raw.githubusercontent.com/TheRocketCodeMX/SAST-DAST-Scan/main}"
 BASE=/opt/devsecops
 ENVF="$BASE/.env"
 
