@@ -1,0 +1,54 @@
+# =============================================================================
+# cloudbuild.yaml · GCP Cloud Build · DevSecOps OSS (rocket code)
+# Secretos en Secret Manager: devsecops-sonar-token, devsecops-dojo-api-key
+# URLs como substitutions del trigger (_SONAR_HOST_URL, _DOJO_URL, _DAST_TARGET_URL)
+# Lo crea setup-gcp.sh.
+# =============================================================================
+steps:
+- id: devsecops
+  name: gcr.io/cloud-builders/docker
+  entrypoint: bash
+  args:
+  - -c
+  - |
+    apt-get -qq update >/dev/null && apt-get -qq install -y curl git jq >/dev/null
+    bash devsecops/devsecops-scan.sh
+  secretEnv: [SONAR_TOKEN, DOJO_API_KEY]
+  env:
+  - CLOUD_BUILD=true
+  - DOCKER_NETWORK=cloudbuild
+  - BRANCH=$BRANCH_NAME
+  - BRANCH_FALLBACK=$_MANUAL_BRANCH
+  - COMMIT=$COMMIT_SHA
+  - BUILD_ID=$BUILD_ID
+  - APP_NAME=$_APP_NAME
+  - REPO_NAME=$REPO_NAME
+  - PR_NUMBER=$_PR_NUMBER
+  - SONAR_HOST_URL=$_SONAR_HOST_URL
+  - DOJO_URL=$_DOJO_URL
+  - DAST_TARGET_URL=$_DAST_TARGET_URL
+  - FAIL_ON_HIGH=$_FAIL_ON_HIGH
+  - ZAP_MODE=$_ZAP_MODE
+  - ZAP_API_SPEC=$_ZAP_API_SPEC
+
+substitutions:
+  _SONAR_HOST_URL: ''
+  _DOJO_URL: ''
+  _DAST_TARGET_URL: ''
+  _FAIL_ON_HIGH: 'false'     # true = falla con hallazgos High/Critical
+  _ZAP_MODE: baseline        # baseline | full | api
+  _ZAP_API_SPEC: ''
+  _APP_NAME: ''
+  _MANUAL_BRANCH: ''         # solo para "gcloud builds submit" manual
+
+availableSecrets:
+  secretManager:
+  - versionName: projects/$PROJECT_ID/secrets/devsecops-sonar-token/versions/latest
+    env: SONAR_TOKEN
+  - versionName: projects/$PROJECT_ID/secrets/devsecops-dojo-api-key/versions/latest
+    env: DOJO_API_KEY
+
+options:
+  substitutionOption: ALLOW_LOOSE
+  logging: CLOUD_LOGGING_ONLY
+timeout: 7200s
